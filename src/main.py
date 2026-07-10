@@ -51,6 +51,25 @@ async def get_registry(user_id: str):
     return {"user_id": user_id, "gateway_id": owner}
 
 
+@app.get("/rooms/{room_id}/messages")
+async def get_room_messages(room_id: str, limit: int = 50, before: str | None = None):
+    limit = max(1, min(limit, 200))
+    items = await dynamo.get_room_messages(room_id, limit=limit, before=before)
+
+    messages = [
+        {
+            "message_id": item["message_id"],
+            "sender_id": item["sender_id"],
+            "text": item["text"],
+            "timestamp_ms": int(item["timestamp_ms"]),
+        }
+        for item in reversed(items)  # oldest-to-newest for display
+    ]
+    next_before = items[-1]["sort_key"] if len(items) == limit else None
+
+    return {"room_id": room_id, "messages": messages, "next_before": next_before}
+
+
 @app.get("/metrics")
 async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

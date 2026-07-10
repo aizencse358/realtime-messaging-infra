@@ -45,3 +45,48 @@ async def test_room_members_gsi_reverses_lookup_by_user():
     )
     room_ids = {item["room_id"] for item in result["Items"]}
     assert room_ids == {"room1", "room2"}
+
+
+def _seed_message(room_id: str, ts_ms: int, message_id: str, text: str) -> None:
+    dynamo._messages_table().put_item(
+        Item={
+            "conversation_id": room_id,
+            "sort_key": f"{ts_ms}#{message_id}",
+            "message_id": message_id,
+            "sender_id": "alice",
+            "text": text,
+            "timestamp_ms": ts_ms,
+        }
+    )
+
+
+async def test_get_room_messages_returns_oldest_to_newest():
+    _seed_message("room1", 100, "m1", "first")
+    _seed_message("room1", 200, "m2", "second")
+    _seed_message("room1", 300, "m3", "third")
+
+    items = await dynamo.get_room_messages("room1", limit=50)
+
+    assert [item["text"] for item in items] == ["third", "second", "first"]
+
+
+async def test_get_room_messages_paginates_with_before_cursor():
+    _seed_message("room1", 100, "m1", "first")
+    _seed_message("room1", 200, "m2", "second")
+    _seed_message("room1", 300, "m3", "third")
+
+    first_page = await dynamo.get_room_messages("room1", limit=2)
+    assert [item["text"] for item in first_page] == ["third", "second"]
+
+    cursor = first_page[-1]["sort_key"]
+    second_page = await dynamo.get_room_messages("room1", limit=2, before=cursor)
+    assert [item["text"] for item in second_page] == ["first"]
+
+
+async def test_get_room_messages_scoped_to_room():
+    _seed_message("room1", 100, "m1", "in room1")
+    _seed_message("room2", 100, "m2", "in room2")
+
+    items = await dynamo.get_room_messages("room1", limit=50)
+
+    assert [item["text"] for item in items] == ["in room1"]

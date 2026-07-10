@@ -4,6 +4,7 @@ import uuid
 from functools import lru_cache
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 from src.config import (
@@ -121,6 +122,28 @@ def _put_message_sync(room_id: str, sender_id: str, text: str) -> dict:
 
 async def put_message(room_id: str, sender_id: str, text: str) -> dict:
     return await asyncio.to_thread(_put_message_sync, room_id, sender_id, text)
+
+
+def _get_room_messages_sync(room_id: str, limit: int, before: str | None) -> list[dict]:
+    key_condition = Key("conversation_id").eq(room_id)
+    if before is not None:
+        key_condition &= Key("sort_key").lt(before)
+
+    response = _messages_table().query(
+        KeyConditionExpression=key_condition,
+        # Newest first, so a page is always "the most recent `limit`
+        # messages before `before`" — the natural shape for chat history
+        # (load latest, then page backward for older messages).
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+    return response.get("Items", [])
+
+
+async def get_room_messages(
+    room_id: str, limit: int = 50, before: str | None = None
+) -> list[dict]:
+    return await asyncio.to_thread(_get_room_messages_sync, room_id, limit, before)
 
 
 def _update_last_seen_sync(user_id: str, last_seen_at: int) -> None:

@@ -118,11 +118,25 @@ JSON frames:
 {"type": "leave", "room_id": "general"}
 ```
 
+Fetch durable message history for a room (any replica, since it reads
+straight from DynamoDB rather than gateway-local state):
+
+```
+GET /rooms/{room_id}/messages?limit=50&before={sort_key}
+```
+
+Returns the most recent `limit` messages (oldest-to-newest) before the
+`before` cursor (defaults to "now" if omitted). The response includes
+`next_before` — the `sort_key` of the oldest message on the page — to page
+further back; it's `null` once a page comes back short (no older messages
+left).
+
 Debug endpoints (hit any replica directly or through nginx):
 
 - `GET /healthz` — reports which gateway instance answered
 - `GET /presence/{user_id}` — online/offline
 - `GET /registry/{user_id}` — which gateway instance currently owns this user
+- `GET /metrics` — Prometheus scrape target for this instance
 
 ## Build phases
 
