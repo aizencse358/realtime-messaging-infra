@@ -1,0 +1,31 @@
+[project]
+name = "realtime-messaging-infra"
+version = "0.1.0"
+description = "Horizontally scalable WebSocket messaging gateway (FastAPI + Redis pub/sub + DynamoDB)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.6",
+    "redis==5.0.8",
+    "boto3==1.35.24",
+    "websockets==13.1",
+    "pydantic==2.9.2",
+    "python-dotenv==1.0.1",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.36.2",
+    "httpx>=0.28.1",
+    "moto[dynamodb]>=5.2.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

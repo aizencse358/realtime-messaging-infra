@@ -1,0 +1,134 @@
+import json
+import logging
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+
+from src import dynamo
+from src.config import GATEWAY_ID, presence_key, registry_key
+from src.connection_manager import manager
+from src.observability import configure_logging, install_request_logging
+from src.redis_client import close_redis, get_redis
+
+configure_logging()
+logger = logging.getLogger("gateway")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await dynamo.init_tables()
+    await manager.start()
+    logger.info("event=gateway_started gateway_id=%s", GATEWAY_ID)
+    yield
+    await manager.stop()
+    await close_redis()
+
+
+app = FastAPI(title="realtime-messaging-gateway", lifespan=lifespan)
+install_request_logging(app)
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok", "gateway_id": GATEWAY_ID}
+
+
+@app.get("/presence/{user_id}")
+async def get_presence(user_id: str):
+    redis = get_redis()
+    online = await redis.get(presence_key(user_id))
+    return {"user_id": user_id, "online": online is not None}
+
+
+@app.get("/registry/{user_id}")
+async def get_registry(user_id: str):
+    redis = get_redis()
+    owner = await redis.get(registry_key(user_id))
+    return {"user_id": user_id, "gateway_id": owner}
+
+
+async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        await websocket.send_text(json.dumps({"type": "error", "error": "invalid_json"}))
+        return
+
+    msg_type = frame.get("type")
+
+    if msg_type == "join":
+        room_id = frame["room_id"]
+        await manager.join_room(room_id, user_id)
+        await websocket.send_text(json.dumps({"type": "joined", "room_id": room_id}))
+
+    elif msg_type == "leave":
+        room_id = frame["room_id"]
+        await manager.leave_room(room_id, user_id)
+        await websocket.send_text(json.dumps({"type": "left", "room_id": room_id}))
+
+    elif msg_type == "send":
+        room_id = frame["room_id"]
+        text = frame["text"]
+        client_msg_id = frame.get("client_msg_id")
+        sent_at_ms = frame.get("sent_at_ms")
+
+        t0 = time.perf_counter()
+        stored = await dynamo.put_message(room_id, user_id, text)
+        duration_ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "event=message_sent room_id=%s sender_id=%s message_id=%s duration_ms=%.2f",
+            room_id,
+            user_id,
+            stored["message_id"],
+            duration_ms,
+        )
+        payload = {
+            "type": "message",
+            "room_id": room_id,
+            "sender_id": user_id,
+            "text": text,
+            "message_id": stored["message_id"],
+            "timestamp_ms": stored["timestamp_ms"],
+            "client_msg_id": client_msg_id,
+            "sent_at_ms": sent_at_ms,
+        }
+        await manager.publish_to_room(room_id, payload)
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "sent",
+                    "room_id": room_id,
+                    "message_id": stored["message_id"],
+                    "client_msg_id": client_msg_id,
+                }
+            )
+        )
+
+    elif msg_type == "ping":
+        await websocket.send_text(json.dumps({"type": "pong", "ts_ms": int(time.time() * 1000)}))
+
+    else:
+        await websocket.send_text(json.dumps({"type": "error", "error": "unknown_type"}))
+
+
+@app.websocket("/ws/{user_id}")
+async def ws_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            await _handle_frame(user_id, websocket, raw)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("unhandled error on connection for %s", user_id)
+    finally:
+        await manager.disconnect(user_id)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    logger.exception("unhandled exception")
+    return JSONResponse(status_code=500, content={"error": "internal_error"})

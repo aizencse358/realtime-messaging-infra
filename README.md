@@ -1,0 +1,195 @@
+# realtime-messaging-infra
+
+A horizontally scalable WebSocket messaging gateway built with FastAPI, Redis,
+and DynamoDB — demonstrating that a stateless-at-the-LB, refcounted-at-the-
+gateway pub/sub design lets any of N gateway replicas serve any user, with no
+sticky sessions.
+
+## Architecture
+
+```
+                     ┌────────────┐
+        WS clients ─▶│   nginx    │  round-robin, no sticky sessions
+                     └─────┬──────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         ┌─────────┐  ┌─────────┐  ┌─────────┐
+         │gateway1 │  │gateway2 │  │gateway3 │   FastAPI + websockets
+         └────┬────┘  └────┬────┘  └────┬────┘
+              │            │            │
+              └──────┬─────┴─────┬──────┘
+                      ▼           ▼
+                  ┌───────┐   ┌──────────┐
+                  │ Redis │   │ DynamoDB │
+                  │pub/sub│   │  Local   │
+                  │presence│  │ (durable)│
+                  │registry│  └──────────┘
+                  └───────┘
+```
+
+Each gateway replica is a plain FastAPI process holding only the WebSocket
+connections it physically accepted. There is no shared in-memory state
+between replicas — cross-instance behavior (room fanout, direct delivery,
+presence, "who owns this user") all goes through Redis. That's what makes it
+safe for nginx to round-robin every new connection with zero session
+affinity.
+
+### Redis keys/channels
+
+| Key/channel                     | Purpose                                            | TTL  |
+|----------------------------------|-----------------------------------------------------|------|
+| `chat:room:{room_id}`            | Pub/sub channel; one message published here reaches every gateway with a local member in that room | — |
+| `chat:user:{user_id}`            | Pub/sub channel for direct delivery to one user, regardless of which gateway they're connected to | — |
+| `presence:user:{user_id}`        | Online/offline flag, refreshed every ~20s while connected | ~45s |
+| `registry:user:{user_id}`        | Maps a connected user to the gateway instance currently serving them | ~45s |
+
+### Refcounted room subscriptions
+
+Each gateway subscribes to `chat:room:{room_id}` only when the **first**
+locally-connected member joins that room, and unsubscribes when the
+**last** local member leaves. A room with 10,000 members spread across 3
+gateways results in at most 3 active Redis subscriptions for that room —
+not 10,000 — while still delivering every message to every member no
+matter which replica they're attached to. See `src/connection_manager.py`.
+
+### DynamoDB schema
+
+| Table         | PK              | SK                      | Notes                                   |
+|---------------|-----------------|--------------------------|------------------------------------------|
+| `Messages`     | `conversation_id` | `sort_key` = `{timestamp_ms}#{message_id}` | Durable message log per room, naturally time-ordered |
+| `Users`        | `user_id`        | —                         | `last_seen_at` flushed on disconnect     |
+| `RoomMembers`  | `room_id`        | `user_id`                 | GSI `gsi_user_rooms` reverses the key (`user_id` → `room_id`) for "which rooms is this user in" lookups |
+
+### Gateway responsibilities
+
+- Refcount room subscriptions per instance (subscribe on first local join,
+  unsubscribe on last local leave).
+- On `send`: publish to the room's Redis channel **and** persist the message
+  to DynamoDB — durability doesn't depend on delivery, and vice versa.
+- Heartbeat presence (`presence:user:{user_id}`) and refresh the registry
+  entry (`registry:user:{user_id}`) every ~20s while connected.
+- On disconnect: flush `last_seen_at` to DynamoDB, drop presence/registry
+  keys immediately (don't wait out the TTL), and unwind room refcounts.
+
+## Project structure
+
+```
+realtime-messaging-infra/
+├── docker-compose.yml     # redis, dynamodb-local, table init, 3 gateway replicas, nginx
+├── Dockerfile             # uv-based image for the gateway (and load test scripts)
+├── nginx/nginx.conf       # WS-aware round-robin LB, no sticky sessions
+├── pyproject.toml / uv.lock
+├── src/
+│   ├── main.py                # FastAPI app, WS endpoint, frame dispatch
+│   ├── connection_manager.py  # local connections, refcounted room subs, presence/registry
+│   ├── dynamo.py              # table definitions + boto3 access (via asyncio.to_thread)
+│   ├── redis_client.py        # shared redis.asyncio client
+│   ├── schemas.py              # WS frame pydantic models
+│   ├── config.py               # env config + key/channel name helpers
+│   └── init_tables.py           # one-shot DynamoDB table creation (compose service)
+└── loadtest/
+    ├── common.py               # Stats/percentile helpers, ws_url()
+    ├── test_connect_rate.py    # connection accept rate
+    ├── test_fanout_latency.py  # cross-instance fanout latency (p50/p95/p99)
+    ├── test_churn.py           # subscribe/unsubscribe churn cost
+    └── run_all.py              # runs everything, prints the combined table
+```
+
+## Running it
+
+Everything runs via Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+This brings up Redis, DynamoDB Local (in-memory, tables created by the
+`dynamodb-init` one-shot service), 3 gateway replicas, and nginx listening
+on `localhost:8080`.
+
+Connect a WebSocket client to `ws://localhost:8080/ws/{user_id}` and send
+JSON frames:
+
+```json
+{"type": "join", "room_id": "general"}
+{"type": "send", "room_id": "general", "text": "hello"}
+{"type": "leave", "room_id": "general"}
+```
+
+Debug endpoints (hit any replica directly or through nginx):
+
+- `GET /healthz` — reports which gateway instance answered
+- `GET /presence/{user_id}` — online/offline
+- `GET /registry/{user_id}` — which gateway instance currently owns this user
+
+## Build phases
+
+1. **Single gateway, end-to-end** — one gateway, Redis, DynamoDB Local; join
+   a room, send a message, see it persisted and delivered back over the same
+   socket.
+2. **3 replicas behind nginx** — connect clients repeatedly; nginx's default
+   round-robin (no `ip_hash`) scatters them across `gateway1/2/3`. A message
+   sent by a client on `gateway1` is delivered to a member connected on
+   `gateway3` purely via the `chat:room:{room_id}` Redis channel — proving
+   fanout doesn't depend on which replica anyone landed on.
+3. **Load tests** — `loadtest/` measures connection accept rate,
+   cross-instance fanout latency percentiles, and room subscribe/unsubscribe
+   churn cost.
+
+## Observability
+
+There's no separate monitoring stack (no Prometheus/Grafana) — observability
+is structured `key=value` log lines (`src/observability.py`):
+
+- Every HTTP request is timed and logged (`event=request method=... path=...
+  status=... duration_ms=...`).
+- Gateway/connection lifecycle events are logged as they happen:
+  `event=ws_connected`, `event=ws_disconnected`, `event=room_joined`,
+  `event=room_left`, `event=room_subscribed` / `event=room_unsubscribed`
+  (only fired on the actual refcount transition), `event=message_sent`.
+
+`LOG_LEVEL` (default `INFO`) controls verbosity; set it per-service in
+`docker-compose.yml`.
+
+## Tests
+
+```bash
+uv sync --group dev
+uv run pytest -v
+```
+
+Tests are unit-level and don't require the compose stack to be running —
+`tests/conftest.py` swaps in `fakeredis` for Redis and `moto` for DynamoDB,
+so `ConnectionManager` and the `dynamo` module are exercised against
+realistic (in-memory) protocol behavior rather than mocks of the code itself.
+CI (`.github/workflows/ci.yml`) runs the same command on every push and PR.
+
+## Load testing
+
+Run against the compose stack (through nginx, so traffic is spread across
+all 3 replicas):
+
+```bash
+uv sync
+GATEWAY_URL=ws://localhost:8080 uv run python -m loadtest.run_all
+```
+
+Individual scripts (`test_connect_rate.py`, `test_fanout_latency.py`,
+`test_churn.py`) can also be run standalone; each takes env vars for its
+sample size (`CONNECT_RATE_N`, `FANOUT_RECEIVERS`/`FANOUT_MESSAGES`,
+`CHURN_ROOMS`).
+
+Sample output shape:
+
+```
+== combined benchmark table ==
+Metric                                   avg(ms)   min(ms)   p50(ms)   p95(ms)   p99(ms)   max(ms)       n
+------------------------------------------------------------------------------------------------------------
+Connection accept latency                X.XXX     X.XXX     X.XXX     X.XXX     X.XXX     X.XXX      500
+Cross-instance fanout latency            X.XXX     X.XXX     X.XXX     X.XXX     X.XXX     X.XXX     2000
+Room join (subscribe) RTT                X.XXX     X.XXX     X.XXX     X.XXX     X.XXX     X.XXX      300
+Room leave (unsubscribe) RTT             X.XXX     X.XXX     X.XXX     X.XXX     X.XXX     X.XXX      300
+
+Connections/sec (accept rate): XXX.XX
+Fanout delivered / expected: 1.00
+```
