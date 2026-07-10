@@ -1,5 +1,7 @@
 # realtime-messaging-infra
 
+[![CI](https://github.com/aizencse358/realtime-messaging-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/aizencse358/realtime-messaging-infra/actions/workflows/ci.yml)
+
 A horizontally scalable WebSocket messaging gateway built with FastAPI, Redis,
 and DynamoDB — demonstrating that a stateless-at-the-LB, refcounted-at-the-
 gateway pub/sub design lets any of N gateway replicas serve any user, with no
