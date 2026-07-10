@@ -17,6 +17,15 @@ from src.config import (
     room_channel,
     user_channel,
 )
+from src.metrics import (
+    messages_delivered_total,
+    room_joins_total,
+    room_leaves_total,
+    room_subscribes_total,
+    room_subscriptions_active,
+    room_unsubscribes_total,
+    ws_connections_active,
+)
 from src.redis_client import get_redis
 
 logger = logging.getLogger("gateway.connections")
@@ -76,6 +85,7 @@ class ConnectionManager:
         self.heartbeat_tasks[user_id] = asyncio.create_task(
             self._heartbeat_loop(user_id)
         )
+        ws_connections_active.labels(GATEWAY_ID).inc()
         logger.info("event=ws_connected user_id=%s gateway_id=%s", user_id, GATEWAY_ID)
 
     async def disconnect(self, user_id: str) -> None:
@@ -94,6 +104,7 @@ class ConnectionManager:
         await redis.delete(presence_key(user_id), registry_key(user_id))
         last_seen_at = int(time.time())
         await dynamo.update_last_seen(user_id, last_seen_at)
+        ws_connections_active.labels(GATEWAY_ID).dec()
         logger.info(
             "event=ws_disconnected user_id=%s gateway_id=%s last_seen_at=%s",
             user_id,
@@ -111,18 +122,22 @@ class ConnectionManager:
             self.user_rooms[user_id].add(room_id)
             if is_first_local_member:
                 await self._pubsub.subscribe(room_channel(room_id))
+                room_subscribes_total.labels(GATEWAY_ID).inc()
+                room_subscriptions_active.labels(GATEWAY_ID).inc()
                 logger.info(
                     "event=room_subscribed room_id=%s gateway_id=%s reason=first_local_member",
                     room_id,
                     GATEWAY_ID,
                 )
         await dynamo.put_room_member(room_id, user_id)
+        room_joins_total.labels(GATEWAY_ID).inc()
         logger.info("event=room_joined room_id=%s user_id=%s", room_id, user_id)
 
     async def leave_room(self, room_id: str, user_id: str) -> None:
         async with self._lock:
             await self._leave_room_locked(room_id, user_id)
         await dynamo.delete_room_member(room_id, user_id)
+        room_leaves_total.labels(GATEWAY_ID).inc()
         logger.info("event=room_left room_id=%s user_id=%s", room_id, user_id)
 
     async def _leave_room_locked(self, room_id: str, user_id: str) -> None:
@@ -134,6 +149,8 @@ class ConnectionManager:
         if not members:
             del self.room_members[room_id]
             await self._pubsub.unsubscribe(room_channel(room_id))
+            room_unsubscribes_total.labels(GATEWAY_ID).inc()
+            room_subscriptions_active.labels(GATEWAY_ID).dec()
             logger.info(
                 "event=room_unsubscribed room_id=%s gateway_id=%s reason=last_local_member_left",
                 room_id,
@@ -215,6 +232,7 @@ class ConnectionManager:
             if ws is not None:
                 try:
                     await ws.send_text(text)
+                    messages_delivered_total.labels(GATEWAY_ID).inc()
                 except Exception:
                     logger.exception("failed to deliver to %s in room %s", user_id, room_id)
 

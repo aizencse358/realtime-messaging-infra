@@ -4,6 +4,8 @@ import time
 
 from fastapi import FastAPI, Request
 
+from src.metrics import http_request_seconds
+
 logger = logging.getLogger("gateway")
 
 
@@ -20,7 +22,12 @@ def install_request_logging(app: FastAPI) -> None:
     async def log_requests(request: Request, call_next):
         start = time.perf_counter()
         response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000
+        duration_seconds = time.perf_counter() - start
+        duration_ms = duration_seconds * 1000
+        path = request.scope.get("route").path if request.scope.get("route") else request.url.path
+        http_request_seconds.labels(request.method, path, str(response.status_code)).observe(
+            duration_seconds
+        )
         logger.info(
             "event=request method=%s path=%s status=%s duration_ms=%.2f",
             request.method,

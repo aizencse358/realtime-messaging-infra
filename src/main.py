@@ -4,11 +4,13 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src import dynamo
 from src.config import GATEWAY_ID, presence_key, registry_key
 from src.connection_manager import manager
+from src.metrics import message_persist_seconds, messages_sent_total
 from src.observability import configure_logging, install_request_logging
 from src.redis_client import close_redis, get_redis
 
@@ -49,6 +51,11 @@ async def get_registry(user_id: str):
     return {"user_id": user_id, "gateway_id": owner}
 
 
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
     try:
         frame = json.loads(raw)
@@ -76,7 +83,10 @@ async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
 
         t0 = time.perf_counter()
         stored = await dynamo.put_message(room_id, user_id, text)
-        duration_ms = (time.perf_counter() - t0) * 1000
+        duration_seconds = time.perf_counter() - t0
+        duration_ms = duration_seconds * 1000
+        message_persist_seconds.labels(GATEWAY_ID).observe(duration_seconds)
+        messages_sent_total.labels(GATEWAY_ID).inc()
         logger.info(
             "event=message_sent room_id=%s sender_id=%s message_id=%s duration_ms=%.2f",
             room_id,

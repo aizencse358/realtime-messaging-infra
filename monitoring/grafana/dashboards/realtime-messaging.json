@@ -1,0 +1,176 @@
+{
+  "title": "Realtime Messaging Gateway",
+  "uid": "realtime-messaging-infra",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active WebSocket Connections (per gateway)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "ws_connections_active",
+          "legendFormat": "{{gateway_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Active Room Subscriptions (per gateway)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "room_subscriptions_active",
+          "legendFormat": "{{gateway_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Message Throughput (sent vs. fanout-delivered)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(messages_sent_total[1m])",
+          "legendFormat": "sent {{gateway_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(messages_delivered_total[1m])",
+          "legendFormat": "delivered {{gateway_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Room Subscribe/Unsubscribe Churn Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(room_subscribes_total[1m])",
+          "legendFormat": "subscribe {{gateway_id}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(room_unsubscribes_total[1m])",
+          "legendFormat": "unsubscribe {{gateway_id}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "HTTP Request Latency (p95 by route)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Message Persist Latency (DynamoDB write)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(message_persist_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(message_persist_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(message_persist_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Total Active Connections (cluster-wide)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 24, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(ws_connections_active)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Total Active Room Subscriptions (cluster-wide)",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 24, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(room_subscriptions_active)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Room Joins (total, cluster-wide)",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 24, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(room_joins_total)",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

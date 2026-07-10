@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: gateways
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - gateway1:8000
+          - gateway2:8000
+          - gateway3:8000

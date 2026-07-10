@@ -106,8 +106,8 @@ docker compose up --build
 ```
 
 This brings up Redis, DynamoDB Local (in-memory, tables created by the
-`dynamodb-init` one-shot service), 3 gateway replicas, and nginx listening
-on `localhost:8080`.
+`dynamodb-init` one-shot service), 3 gateway replicas, nginx listening on
+`localhost:8080`, and Prometheus + Grafana (see [Observability](#observability)).
 
 Connect a WebSocket client to `ws://localhost:8080/ws/{user_id}` and send
 JSON frames:
@@ -140,18 +140,33 @@ Debug endpoints (hit any replica directly or through nginx):
 
 ## Observability
 
-There's no separate monitoring stack (no Prometheus/Grafana) — observability
-is structured `key=value` log lines (`src/observability.py`):
+Two layers, matching different needs:
 
-- Every HTTP request is timed and logged (`event=request method=... path=...
-  status=... duration_ms=...`).
-- Gateway/connection lifecycle events are logged as they happen:
-  `event=ws_connected`, `event=ws_disconnected`, `event=room_joined`,
+- **Structured logs** (`src/observability.py`) — `key=value` lines: every
+  HTTP request is timed and logged (`event=request method=... path=...
+  status=... duration_ms=...`), and connection lifecycle events fire as they
+  happen: `event=ws_connected`, `event=ws_disconnected`, `event=room_joined`,
   `event=room_left`, `event=room_subscribed` / `event=room_unsubscribed`
-  (only fired on the actual refcount transition), `event=message_sent`.
+  (only on the actual refcount transition), `event=message_sent`.
+  `LOG_LEVEL` (default `INFO`) controls verbosity; set it per-service in
+  `docker-compose.yml`.
 
-`LOG_LEVEL` (default `INFO`) controls verbosity; set it per-service in
-`docker-compose.yml`.
+- **Prometheus + Grafana** (`src/metrics.py`) — every gateway exposes
+  `GET /metrics`. Prometheus (`monitoring/prometheus.yml`) scrapes all 3
+  replicas every 5s; Grafana auto-provisions a Prometheus datasource and a
+  ready-made **"Realtime Messaging Gateway"** dashboard
+  (`monitoring/grafana/dashboards/realtime-messaging.json`) with panels for:
+
+  - active WebSocket connections per gateway
+  - active room subscriptions per gateway (the refcounted subscribe/unsubscribe state)
+  - message throughput: sent vs. fanout-delivered
+  - room subscribe/unsubscribe churn rate
+  - HTTP request latency (p95 by route)
+  - message persist latency (DynamoDB write, p50/p95/p99)
+  - cluster-wide totals: active connections, active subscriptions, room joins
+
+  Open Grafana at `http://localhost:3000` (anonymous viewer access is
+  enabled by default) and Prometheus directly at `http://localhost:9090`.
 
 ## Tests
 
