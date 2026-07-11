@@ -201,16 +201,40 @@ Two layers, matching different needs:
 
 ## Tests
 
-```bash
-uv sync --group dev
-uv run pytest -v
-```
+Two tiers:
 
-Tests are unit-level and don't require the compose stack to be running —
-`tests/conftest.py` swaps in `fakeredis` for Redis and `moto` for DynamoDB,
-so `ConnectionManager` and the `dynamo` module are exercised against
-realistic (in-memory) protocol behavior rather than mocks of the code itself.
-CI (`.github/workflows/ci.yml`) runs the same command on every push and PR.
+- **`tests/`** — unit-level, no containers needed. `tests/conftest.py` swaps
+  in `fakeredis` for Redis and `moto` for DynamoDB, so `ConnectionManager`
+  and the `dynamo` module are exercised against realistic (in-memory)
+  protocol behavior rather than mocks of the code itself.
+
+  ```bash
+  uv sync --group dev
+  uv run pytest -v
+  ```
+
+  CI (`.github/workflows/ci.yml`) runs this on every push and PR.
+
+- **`tests/integration/`** — drives the real `docker compose` stack through
+  nginx: end-to-end join/send/receive, message history pagination against
+  real DynamoDB, cross-instance fanout (asserts connections actually land on
+  more than one replica and a message crosses between them), and chaos
+  tests that kill a gateway container mid-connection and verify the client
+  gets disconnected, the cluster keeps serving new connections, and rooms
+  still fan out correctly afterward. Auto-skips (not fails) if the stack
+  isn't reachable, so it's safe to include in a full `uv run pytest` run
+  even without compose up — this is intentionally *not* wired into CI (no
+  docker-in-docker there), it's for local verification:
+
+  ```bash
+  docker compose up -d
+  uv run pytest tests/integration -v
+  ```
+
+  This tier is what actually caught two real bugs while building this
+  project — a pub/sub listener crash and an nginx routing gotcha — that the
+  fakeredis/moto unit tests couldn't see, since both only reproduced against
+  the real stack.
 
 ## Load testing
 

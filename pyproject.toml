@@ -30,3 +30,6 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "integration: requires a live `docker compose up` stack; auto-skips if unreachable",
+]
