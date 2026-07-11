@@ -77,18 +77,25 @@ matter which replica they're attached to. See `src/connection_manager.py`.
 
 ```
 realtime-messaging-infra/
-├── docker-compose.yml     # redis, dynamodb-local, table init, 3 gateway replicas, nginx
+├── docker-compose.yml     # redis, dynamodb-local, table init, 3 gateway replicas, nginx, prometheus, grafana
 ├── Dockerfile             # uv-based image for the gateway (and load test scripts)
-├── nginx/nginx.conf       # WS-aware round-robin LB, no sticky sessions
+├── nginx/nginx.conf       # WS-aware round-robin LB (no sticky sessions) + static chat client
+├── web/index.html         # self-contained browser chat client
+├── monitoring/
+│   ├── prometheus.yml               # scrapes all 3 gateway replicas
+│   └── grafana/                     # auto-provisioned datasource + dashboard
 ├── pyproject.toml / uv.lock
 ├── src/
-│   ├── main.py                # FastAPI app, WS endpoint, frame dispatch
+│   ├── main.py                # FastAPI app, WS endpoint, frame dispatch, HTTP routes
 │   ├── connection_manager.py  # local connections, refcounted room subs, presence/registry
 │   ├── dynamo.py              # table definitions + boto3 access (via asyncio.to_thread)
 │   ├── redis_client.py        # shared redis.asyncio client
-│   ├── schemas.py              # WS frame pydantic models
-│   ├── config.py               # env config + key/channel name helpers
-│   └── init_tables.py           # one-shot DynamoDB table creation (compose service)
+│   ├── metrics.py              # Prometheus metric definitions
+│   ├── observability.py        # structured logging + HTTP timing middleware
+│   ├── schemas.py               # WS frame pydantic models
+│   ├── config.py                # env config + key/channel name helpers
+│   └── init_tables.py            # one-shot DynamoDB table creation (compose service)
+├── tests/                  # pytest, fakeredis + moto (no live containers needed)
 └── loadtest/
     ├── common.py               # Stats/percentile helpers, ws_url()
     ├── test_connect_rate.py    # connection accept rate
@@ -109,8 +116,18 @@ This brings up Redis, DynamoDB Local (in-memory, tables created by the
 `dynamodb-init` one-shot service), 3 gateway replicas, nginx listening on
 `localhost:8080`, and Prometheus + Grafana (see [Observability](#observability)).
 
-Connect a WebSocket client to `ws://localhost:8080/ws/{user_id}` and send
-JSON frames:
+### Browser chat client
+
+Open **`http://localhost:8080/`** — a small static page (`web/index.html`,
+served by nginx alongside the API) that connects over WebSocket, joins
+rooms, loads history, and sends/receives messages. It's also the easiest
+way to *see* the no-sticky-sessions claim: every connection displays which
+gateway replica (`gateway1`/`2`/`3`) it landed on, so opening a few browser
+tabs and joining the same room shows messages fanning out across replicas
+in real time.
+
+Or connect a raw WebSocket client to `ws://localhost:8080/ws/{user_id}` and
+send JSON frames directly:
 
 ```json
 {"type": "join", "room_id": "general"}

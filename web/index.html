@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>realtime-messaging-infra chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    color-scheme: light dark;
+    --border: #d0d0d8;
+    --muted: #6b7280;
+    --bg-soft: #f4f5f7;
+    --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --border: #3a3a42;
+      --muted: #9aa0a6;
+      --bg-soft: #202127;
+      --accent: #7d94ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: canvastext;
+    background: canvas;
+  }
+  header {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  #status { font-size: 0.85rem; color: var(--muted); }
+  #status .dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+    background: #d33;
+  }
+  #status.online .dot { background: #2ea043; }
+
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem;
+  }
+
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .row input {
+    flex: 1;
+    min-width: 8rem;
+  }
+
+  input, button {
+    font: inherit;
+    padding: 0.5rem 0.65rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: canvas;
+    color: canvastext;
+  }
+  button {
+    cursor: pointer;
+    background: var(--accent);
+    color: white;
+    border-color: transparent;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  button.secondary {
+    background: transparent;
+    color: canvastext;
+    border-color: var(--border);
+  }
+
+  #log {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    height: 22rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    background: var(--bg-soft);
+    border-radius: 8px;
+    padding: 0.75rem;
+  }
+  #log li { font-size: 0.9rem; line-height: 1.35; }
+  #log li.system { color: var(--muted); font-style: italic; }
+  #log .meta { color: var(--muted); font-size: 0.75rem; margin-left: 0.4rem; }
+  #log .sender { font-weight: 600; }
+
+  #composer { display: flex; gap: 0.5rem; }
+  #composer input { flex: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>realtime-messaging-infra</h1>
+  <div id="status"><span class="dot"></span><span id="status-text">disconnected</span></div>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="row">
+      <input id="username" placeholder="username (e.g. alice)" autocomplete="off" />
+      <button id="connect-btn">Connect</button>
+      <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <input id="room" placeholder="room (e.g. general)" autocomplete="off" />
+      <button id="join-btn" disabled>Join</button>
+      <button id="leave-btn" class="secondary" disabled>Leave</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <ul id="log"></ul>
+    <form id="composer" style="margin-top: 0.75rem;">
+      <input id="message" placeholder="message" autocomplete="off" disabled />
+      <button id="send-btn" type="submit" disabled>Send</button>
+    </form>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  const statusText = $("status-text");
+  const log = $("log");
+
+  const usernameEl = $("username");
+  const connectBtn = $("connect-btn");
+  const disconnectBtn = $("disconnect-btn");
+
+  const roomEl = $("room");
+  const joinBtn = $("join-btn");
+  const leaveBtn = $("leave-btn");
+
+  const composer = $("composer");
+  const messageEl = $("message");
+  const sendBtn = $("send-btn");
+
+  let ws = null;
+  let gatewayId = null;
+  let currentRoom = null;
+
+  function appendLine({ text, sender, meta, system }) {
+    const li = document.createElement("li");
+    if (system) li.className = "system";
+    if (sender) {
+      const s = document.createElement("span");
+      s.className = "sender";
+      s.textContent = sender + ": ";
+      li.appendChild(s);
+    }
+    li.appendChild(document.createTextNode(text));
+    if (meta) {
+      const m = document.createElement("span");
+      m.className = "meta";
+      m.textContent = meta;
+      li.appendChild(m);
+    }
+    log.appendChild(li);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setConnected(connected) {
+    statusEl.classList.toggle("online", connected);
+    statusText.textContent = connected ? `connected via ${gatewayId}` : "disconnected";
+    connectBtn.disabled = connected;
+    usernameEl.disabled = connected;
+    disconnectBtn.disabled = !connected;
+    joinBtn.disabled = !connected;
+    if (!connected) setJoined(false);
+  }
+
+  function setJoined(joined) {
+    leaveBtn.disabled = !joined;
+    messageEl.disabled = !joined;
+    sendBtn.disabled = !joined;
+    joinBtn.disabled = joined || !ws;
+    roomEl.disabled = joined;
+  }
+
+  async function loadHistory(roomId) {
+    try {
+      const res = await fetch(`/rooms/${encodeURIComponent(roomId)}/messages?limit=50`);
+      const data = await res.json();
+      for (const m of data.messages) {
+        appendLine({
+          sender: m.sender_id,
+          text: m.text,
+          meta: new Date(m.timestamp_ms).toLocaleTimeString(),
+        });
+      }
+    } catch (e) {
+      appendLine({ system: true, text: `failed to load history: ${e}` });
+    }
+  }
+
+  connectBtn.addEventListener("click", () => {
+    const username = usernameEl.value.trim();
+    if (!username) return;
+
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(username)}`);
+
+    ws.addEventListener("open", () => {
+      appendLine({ system: true, text: "socket open" });
+    });
+
+    ws.addEventListener("close", () => {
+      appendLine({ system: true, text: "socket closed" });
+      ws = null;
+      gatewayId = null;
+      setConnected(false);
+    });
+
+    ws.addEventListener("error", () => {
+      appendLine({ system: true, text: "socket error" });
+    });
+
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(event.data);
+      switch (frame.type) {
+        case "connected":
+          gatewayId = frame.gateway_id;
+          setConnected(true);
+          appendLine({ system: true, text: `connected as ${frame.user_id}, served by ${gatewayId}` });
+          break;
+        case "joined":
+          currentRoom = frame.room_id;
+          setJoined(true);
+          appendLine({ system: true, text: `joined room "${frame.room_id}"` });
+          loadHistory(frame.room_id);
+          break;
+        case "left":
+          currentRoom = null;
+          setJoined(false);
+          appendLine({ system: true, text: `left room "${frame.room_id}"` });
+          break;
+        case "message":
+          appendLine({
+            sender: frame.sender_id,
+            text: frame.text,
+            meta: new Date(frame.timestamp_ms).toLocaleTimeString(),
+          });
+          break;
+        case "error":
+          appendLine({ system: true, text: `error: ${frame.error}` });
+          break;
+      }
+    });
+  });
+
+  disconnectBtn.addEventListener("click", () => {
+    if (ws) ws.close();
+  });
+
+  joinBtn.addEventListener("click", () => {
+    const roomId = roomEl.value.trim();
+    if (!roomId || !ws) return;
+    ws.send(JSON.stringify({ type: "join", room_id: roomId }));
+  });
+
+  leaveBtn.addEventListener("click", () => {
+    if (!ws || !currentRoom) return;
+    ws.send(JSON.stringify({ type: "leave", room_id: currentRoom }));
+  });
+
+  composer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = messageEl.value.trim();
+    if (!text || !ws || !currentRoom) return;
+    ws.send(
+      JSON.stringify({
+        type: "send",
+        room_id: currentRoom,
+        text,
+        client_msg_id: crypto.randomUUID(),
+        sent_at_ms: Date.now(),
+      })
+    );
+    messageEl.value = "";
+  });
+})();
+</script>
+</body>
+</html>

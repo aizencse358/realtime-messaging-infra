@@ -145,6 +145,9 @@ async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
 @app.websocket("/ws/{user_id}")
 async def ws_endpoint(websocket: WebSocket, user_id: str):
     await manager.connect(user_id, websocket)
+    await websocket.send_text(
+        json.dumps({"type": "connected", "user_id": user_id, "gateway_id": GATEWAY_ID})
+    )
     try:
         while True:
             raw = await websocket.receive_text()
