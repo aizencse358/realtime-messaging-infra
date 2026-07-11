@@ -5,6 +5,7 @@ import time
 
 from fastapi import WebSocket
 from redis.asyncio.client import PubSub
+from redis.exceptions import RedisError
 
 from src import dynamo
 from src.config import (
@@ -80,7 +81,7 @@ class ConnectionManager:
         async with self._lock:
             self.connections[user_id] = websocket
             self.user_rooms.setdefault(user_id, set())
-            await self._pubsub.subscribe(user_channel(user_id))
+            await self._subscribe_best_effort(user_channel(user_id))
         await self._touch_presence_and_registry(user_id)
         self.heartbeat_tasks[user_id] = asyncio.create_task(
             self._heartbeat_loop(user_id)
@@ -96,12 +97,17 @@ class ConnectionManager:
         async with self._lock:
             self.connections.pop(user_id, None)
             rooms = self.user_rooms.pop(user_id, set())
-            await self._pubsub.unsubscribe(user_channel(user_id))
+            await self._unsubscribe_best_effort(user_channel(user_id))
             for room_id in list(rooms):
                 await self._leave_room_locked(room_id, user_id)
 
-        redis = get_redis()
-        await redis.delete(presence_key(user_id), registry_key(user_id))
+        try:
+            redis = get_redis()
+            await redis.delete(presence_key(user_id), registry_key(user_id))
+        except RedisError:
+            logger.warning(
+                "event=redis_unavailable action=clear_presence_registry user_id=%s", user_id
+            )
         last_seen_at = int(time.time())
         await dynamo.update_last_seen(user_id, last_seen_at)
         ws_connections_active.labels(GATEWAY_ID).dec()
@@ -121,7 +127,7 @@ class ConnectionManager:
             members.add(user_id)
             self.user_rooms[user_id].add(room_id)
             if is_first_local_member:
-                await self._pubsub.subscribe(room_channel(room_id))
+                await self._subscribe_best_effort(room_channel(room_id))
                 room_subscribes_total.labels(GATEWAY_ID).inc()
                 room_subscriptions_active.labels(GATEWAY_ID).inc()
                 logger.info(
@@ -148,7 +154,7 @@ class ConnectionManager:
         self.user_rooms.get(user_id, set()).discard(room_id)
         if not members:
             del self.room_members[room_id]
-            await self._pubsub.unsubscribe(room_channel(room_id))
+            await self._unsubscribe_best_effort(room_channel(room_id))
             room_unsubscribes_total.labels(GATEWAY_ID).inc()
             room_subscriptions_active.labels(GATEWAY_ID).dec()
             logger.info(
@@ -156,6 +162,35 @@ class ConnectionManager:
                 room_id,
                 GATEWAY_ID,
             )
+
+    # ---- subscribe/unsubscribe, tolerant of a Redis outage ----
+    #
+    # Local bookkeeping (room_members / user_rooms / connections) is always
+    # updated first regardless of whether the Redis call below succeeds —
+    # it's the source of truth _listen() uses to resubscribe everything
+    # once connectivity comes back, so a subscribe/unsubscribe that fails
+    # here isn't lost, just deferred.
+
+    async def _subscribe_best_effort(self, channel: str) -> None:
+        try:
+            await self._pubsub.subscribe(channel)
+        except RedisError:
+            logger.warning("event=redis_unavailable action=subscribe channel=%s", channel)
+
+    async def _unsubscribe_best_effort(self, channel: str) -> None:
+        try:
+            await self._pubsub.unsubscribe(channel)
+        except RedisError:
+            logger.warning("event=redis_unavailable action=unsubscribe channel=%s", channel)
+
+    async def _resubscribe_all(self) -> None:
+        channels = [user_channel(uid) for uid in self.connections] + [
+            room_channel(rid) for rid in self.room_members
+        ]
+        if not channels:
+            return
+        await self._pubsub.subscribe(*channels)
+        logger.info("event=redis_resubscribed gateway_id=%s channel_count=%d", GATEWAY_ID, len(channels))
 
     # ---- presence + registry ----
 
@@ -170,7 +205,12 @@ class ConnectionManager:
         try:
             while True:
                 await asyncio.sleep(PRESENCE_HEARTBEAT_SECONDS)
-                await self._touch_presence_and_registry(user_id)
+                try:
+                    await self._touch_presence_and_registry(user_id)
+                except RedisError:
+                    logger.warning(
+                        "event=redis_unavailable action=heartbeat user_id=%s", user_id
+                    )
         except asyncio.CancelledError:
             pass
 
@@ -194,17 +234,23 @@ class ConnectionManager:
         # iterator so the lock is held only briefly per loop iteration.
         assert self._pubsub is not None
         while True:
-            async with self._lock:
-                # redis-py raises instead of returning None if get_message()
-                # is called before any subscribe()/psubscribe() has ever
-                # happened on this connection (e.g. at gateway startup,
-                # before the first client connects or joins a room).
-                if self._pubsub.connection is None:
-                    message = None
-                else:
-                    message = await self._pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=0.01
-                    )
+            try:
+                async with self._lock:
+                    # redis-py raises instead of returning None if
+                    # get_message() is called before any
+                    # subscribe()/psubscribe() has ever happened on this
+                    # connection (e.g. at gateway startup, before the first
+                    # client connects or joins a room).
+                    if self._pubsub.connection is None:
+                        message = None
+                    else:
+                        message = await self._pubsub.get_message(
+                            ignore_subscribe_messages=True, timeout=0.01
+                        )
+            except RedisError:
+                await self._reconnect_pubsub()
+                continue
+
             if message is None:
                 await asyncio.sleep(0.01)
                 continue
@@ -223,6 +269,33 @@ class ConnectionManager:
             elif channel.startswith("chat:user:"):
                 user_id = channel.removeprefix("chat:user:")
                 await self._deliver_to_user(user_id, payload)
+
+    async def _reconnect_pubsub(self) -> None:
+        """The dedicated pub/sub connection doesn't reconnect itself the way
+        redis-py's regular connection pool does — a Redis restart otherwise
+        permanently kills fanout on this gateway until the process restarts.
+        Recreate it and resubscribe to everything currently tracked locally
+        (room_members / connections are the source of truth, independent of
+        whatever Redis thinks is subscribed), retrying with backoff for as
+        long as Redis stays unreachable.
+        """
+        logger.warning("event=redis_unavailable action=pubsub_listener gateway_id=%s", GATEWAY_ID)
+        async with self._lock:
+            try:
+                await self._pubsub.aclose()
+            except RedisError:
+                pass
+            self._pubsub = get_redis().pubsub()
+
+        backoff = 0.5
+        while True:
+            try:
+                async with self._lock:
+                    await self._resubscribe_all()
+                return
+            except RedisError:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 5.0)
 
     async def _fanout_to_room(self, room_id: str, payload: dict) -> None:
         members = self.room_members.get(room_id, set())

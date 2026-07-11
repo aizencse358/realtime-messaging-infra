@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis.exceptions import RedisError
 
 from src import dynamo
 from src.config import GATEWAY_ID, presence_key, registry_key
@@ -82,6 +83,22 @@ async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
         await websocket.send_text(json.dumps({"type": "error", "error": "invalid_json"}))
         return
 
+    try:
+        await _dispatch_frame(user_id, websocket, frame)
+    except RedisError:
+        # Redis being transiently unreachable (e.g. a restart) shouldn't
+        # tear down an otherwise-healthy WebSocket connection — surface it
+        # as a frame-level error so the client can retry once Redis is back,
+        # rather than losing the whole session over one blip.
+        logger.warning(
+            "event=redis_unavailable action=handle_frame user_id=%s frame_type=%s",
+            user_id,
+            frame.get("type"),
+        )
+        await websocket.send_text(json.dumps({"type": "error", "error": "redis_unavailable"}))
+
+
+async def _dispatch_frame(user_id: str, websocket: WebSocket, frame: dict) -> None:
     msg_type = frame.get("type")
 
     if msg_type == "join":

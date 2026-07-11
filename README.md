@@ -54,6 +54,14 @@ gateways results in at most 3 active Redis subscriptions for that room —
 not 10,000 — while still delivering every message to every member no
 matter which replica they're attached to. See `src/connection_manager.py`.
 
+The dedicated pub/sub connection this all rides on doesn't reconnect itself
+the way redis-py's regular connection pool does, so a Redis restart is
+handled explicitly: on a connection error the listener recreates the
+pub/sub connection and resubscribes to every channel this instance's local
+state (`room_members` / `connections`) says it should be subscribed to,
+retrying with backoff until Redis is reachable again — no gateway restart
+needed. See [`tests/integration/test_redis_outage.py`](tests/integration/test_redis_outage.py).
+
 ### DynamoDB schema
 
 | Table         | PK              | SK                      | Notes                                   |
@@ -199,6 +207,32 @@ Two layers, matching different needs:
   Open Grafana at `http://localhost:3000` (anonymous viewer access is
   enabled by default) and Prometheus directly at `http://localhost:9090`.
 
+  **To actually see values on the dashboard**, something needs to generate
+  traffic — a freshly started stack has nothing to show yet. The load test
+  suite doubles as a traffic generator for this:
+
+  ```bash
+  uv sync
+  GATEWAY_URL=ws://localhost:8080 uv run python -m loadtest.run_all
+  ```
+
+  That's one burst (a few hundred connections/messages over a few
+  seconds) — enough to populate every panel, but it'll look like a single
+  spike rather than an ongoing trend. To watch the dashboard update
+  continuously instead, loop it:
+
+  ```bash
+  while true; do
+    GATEWAY_URL=ws://localhost:8080 uv run python -m loadtest.run_all
+    sleep 2
+  done
+  ```
+
+  Or open the [browser chat client](#browser-chat-client) in a couple of
+  tabs and send messages by hand — smaller and slower, but it's real
+  traffic through the same path, and you can correlate a specific action
+  (a join, a send) with the panel that moves.
+
 ## Tests
 
 Two tiers:
@@ -217,24 +251,38 @@ Two tiers:
 
 - **`tests/integration/`** — drives the real `docker compose` stack through
   nginx: end-to-end join/send/receive, message history pagination against
-  real DynamoDB, cross-instance fanout (asserts connections actually land on
-  more than one replica and a message crosses between them), and chaos
-  tests that kill a gateway container mid-connection and verify the client
-  gets disconnected, the cluster keeps serving new connections, and rooms
-  still fan out correctly afterward. Auto-skips (not fails) if the stack
-  isn't reachable, so it's safe to include in a full `uv run pytest` run
-  even without compose up — this is intentionally *not* wired into CI (no
-  docker-in-docker there), it's for local verification:
+  real DynamoDB, and cross-instance fanout (asserts connections actually
+  land on more than one replica and a message crosses between them). Plus
+  two chaos tiers that each kill a real dependency mid-session and verify
+  the system degrades gracefully and recovers on its own:
+
+  - **a gateway replica dies** — the client on it gets disconnected, but
+    new connections keep landing on the surviving replicas (nginx routes
+    around the dead one, with a bounded 2s failover rather than a 60s
+    hang) and rooms keep fanning out correctly.
+  - **Redis dies** — every gateway shares this one dependency, so it's a
+    step up in blast radius from a single dead replica. A `send` during
+    the outage returns a clean `{"type":"error","error":"redis_unavailable"}`
+    frame instead of killing the connection, and fanout resumes
+    automatically once Redis is back — each gateway's pub/sub listener
+    reconnects and resubscribes to everything it was tracking, no gateway
+    restart required.
+
+  Auto-skips (not fails) if the stack isn't reachable, so it's safe to
+  include in a full `uv run pytest` run even without compose up — this is
+  intentionally *not* wired into CI (no docker-in-docker there), it's for
+  local verification:
 
   ```bash
   docker compose up -d
   uv run pytest tests/integration -v
   ```
 
-  This tier is what actually caught two real bugs while building this
-  project — a pub/sub listener crash and an nginx routing gotcha — that the
-  fakeredis/moto unit tests couldn't see, since both only reproduced against
-  the real stack.
+  This tier is what actually caught real bugs while building this project
+  — a pub/sub listener crash, an nginx routing gotcha, and (building the
+  Redis chaos test) a second pub/sub reconnection gap — that the
+  fakeredis/moto unit tests couldn't see, since all of them only reproduced
+  against the real stack.
 
 ## Load testing
 

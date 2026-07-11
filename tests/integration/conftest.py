@@ -85,3 +85,36 @@ def restart_gateway_after():
         # out so later tests see all 3 replicas back in the pool rather than
         # only the survivors.
         time.sleep(12)
+
+
+class RedisOutage:
+    """Test controls exactly when Redis goes down and when it comes back —
+    unlike restart_gateway_after, the test needs to assert behavior *during*
+    the outage and *after* recovery within the same test body, not just
+    guarantee cleanup afterward."""
+
+    def __init__(self):
+        self._stopped = False
+
+    def stop(self) -> None:
+        docker_compose("stop", "redis")
+        self._stopped = True
+
+    def restore(self) -> None:
+        docker_compose("start", "redis")
+        for _ in range(25):
+            try:
+                httpx.get(f"{BASE_HTTP}/healthz", timeout=2)
+                break
+            except httpx.HTTPError:
+                time.sleep(0.5)
+        self._stopped = False
+
+
+@pytest.fixture
+def redis_outage():
+    outage = RedisOutage()
+    yield outage
+    if outage._stopped:
+        # safety net in case the test forgot or failed before restoring
+        outage.restore()
