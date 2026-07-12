@@ -68,7 +68,7 @@ needed. See [`tests/integration/test_redis_outage.py`](tests/integration/test_re
 |---------------|-----------------|--------------------------|------------------------------------------|
 | `Messages`     | `conversation_id` | `sort_key` = `{timestamp_ms}#{message_id}` | Durable message log per room, naturally time-ordered |
 | `Users`        | `user_id`        | —                         | `last_seen_at` flushed on disconnect     |
-| `RoomMembers`  | `room_id`        | `user_id`                 | GSI `gsi_user_rooms` reverses the key (`user_id` → `room_id`) for "which rooms is this user in" lookups |
+| `RoomMembers`  | `room_id`        | `user_id`                 | GSI `gsi_user_rooms` reverses the key (`user_id` → `room_id`) for "which rooms is this user in" lookups; `last_read_sort_key` tracks per-user unread state (see [Unread and catch-up tracking](#unread-and-catch-up-tracking)) |
 
 ### Gateway responsibilities
 
@@ -140,6 +140,7 @@ send JSON frames directly:
 ```json
 {"type": "join", "room_id": "general"}
 {"type": "send", "room_id": "general", "text": "hello"}
+{"type": "mark_read", "room_id": "general", "sort_key": "<sort_key of the last message you've seen>"}
 {"type": "leave", "room_id": "general"}
 ```
 
@@ -155,6 +156,24 @@ Returns the most recent `limit` messages (oldest-to-newest) before the
 `next_before` — the `sort_key` of the oldest message on the page — to page
 further back; it's `null` once a page comes back short (no older messages
 left).
+
+### Unread and catch-up tracking
+
+Each `RoomMembers` row carries a `last_read_sort_key` — a per-user,
+per-room read pointer. It's set to "now" the first time someone joins a
+room (so a new member doesn't see the whole history as unread), and left
+untouched on every later rejoin, so time spent offline shows up correctly
+as unread rather than resetting. Advancing it is explicit, not automatic:
+receiving a message live doesn't mark it read — the client has to say so
+(same model Slack uses: a message scrolling by isn't the same as
+acknowledging it). Send `{"type": "mark_read", "room_id": ..., "sort_key":
+...}` with the `sort_key` of the last message you've seen; the `joined` ack
+carries the current `unread_count`, and it's also available without an
+open connection via:
+
+```
+GET /rooms/{room_id}/unread/{user_id}
+```
 
 Debug endpoints (hit any replica directly or through nginx):
 

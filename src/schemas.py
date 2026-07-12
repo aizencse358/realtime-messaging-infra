@@ -23,3 +23,9 @@ class SendMessage(BaseModel):
 
 class Ping(BaseModel):
     type: Literal["ping"]
+
+
+class MarkRead(BaseModel):
+    type: Literal["mark_read"]
+    room_id: str
+    sort_key: str

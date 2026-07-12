@@ -33,6 +33,43 @@ async def test_room_member_put_and_delete():
     assert "Item" not in table.get_item(Key={"room_id": "room1", "user_id": "alice"})
 
 
+async def test_put_room_member_sets_initial_last_read_only_once():
+    await dynamo.put_room_member("room1", "alice", initial_last_read_sort_key="100#m1")
+    member = await dynamo.get_room_member("room1", "alice")
+    assert member["last_read_sort_key"] == "100#m1"
+
+    # a rejoin must not clobber a since-advanced read pointer
+    await dynamo.mark_room_read("room1", "alice", "200#m2")
+    await dynamo.put_room_member("room1", "alice", initial_last_read_sort_key="999#late")
+    member = await dynamo.get_room_member("room1", "alice")
+    assert member["last_read_sort_key"] == "200#m2"
+
+
+async def test_get_room_member_returns_none_when_absent():
+    assert await dynamo.get_room_member("room1", "nobody") is None
+
+
+async def test_latest_message_sort_key_empty_room_is_blank():
+    assert await dynamo.latest_message_sort_key("empty-room") == ""
+
+
+async def test_latest_message_sort_key_returns_newest():
+    await dynamo.put_message("room1", "alice", "first")
+    stored = await dynamo.put_message("room1", "alice", "second")
+
+    assert await dynamo.latest_message_sort_key("room1") == stored["sort_key"]
+
+
+async def test_count_unread_messages():
+    _seed_message("room1", 100, "m1", "first")
+    _seed_message("room1", 200, "m2", "second")
+    _seed_message("room1", 300, "m3", "third")
+
+    assert await dynamo.count_unread_messages("room1", "") == 3
+    assert await dynamo.count_unread_messages("room1", "100#m1") == 2
+    assert await dynamo.count_unread_messages("room1", "300#m3") == 0
+
+
 async def test_room_members_gsi_reverses_lookup_by_user():
     await dynamo.put_room_member("room1", "alice")
     await dynamo.put_room_member("room2", "alice")

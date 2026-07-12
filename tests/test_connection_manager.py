@@ -105,3 +105,49 @@ async def test_disconnect_flushes_last_seen_and_clears_presence(manager, fake_re
 
     item = dynamo._users_table().get_item(Key={"user_id": "alice"})["Item"]
     assert "last_seen_at" in item
+
+
+async def test_disconnect_preserves_durable_room_membership(manager):
+    from src import dynamo
+
+    ws = FakeWebSocket()
+    await manager.connect("alice", ws)
+    await manager.join_room("general", "alice")
+
+    await manager.disconnect("alice")
+
+    # going offline must not be treated as leaving the room — only an
+    # explicit "leave" does that — or unread tracking would have nothing
+    # durable to advance from.
+    member = await dynamo.get_room_member("general", "alice")
+    assert member is not None
+
+
+async def test_join_room_new_member_starts_with_zero_unread(manager):
+    from src import dynamo
+
+    await dynamo.put_message("general", "someone-else", "history before alice joins")
+
+    ws = FakeWebSocket()
+    await manager.connect("alice", ws)
+    unread_count = await manager.join_room("general", "alice")
+
+    assert unread_count == 0
+
+
+async def test_join_room_returning_member_sees_unread_since_last_visit(manager):
+    from src import dynamo
+
+    alice_ws = FakeWebSocket()
+    await manager.connect("alice", alice_ws)
+    await manager.join_room("general", "alice")
+    await manager.disconnect("alice")
+
+    await dynamo.put_message("general", "bob", "missed while alice was away 1")
+    await dynamo.put_message("general", "bob", "missed while alice was away 2")
+
+    alice_ws2 = FakeWebSocket()
+    await manager.connect("alice", alice_ws2)
+    unread_count = await manager.join_room("general", "alice")
+
+    assert unread_count == 2

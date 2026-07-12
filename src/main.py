@@ -63,12 +63,29 @@ async def get_room_messages(room_id: str, limit: int = 50, before: str | None = 
             "sender_id": item["sender_id"],
             "text": item["text"],
             "timestamp_ms": int(item["timestamp_ms"]),
+            "sort_key": item["sort_key"],
         }
         for item in reversed(items)  # oldest-to-newest for display
     ]
     next_before = items[-1]["sort_key"] if len(items) == limit else None
 
     return {"room_id": room_id, "messages": messages, "next_before": next_before}
+
+
+@app.get("/rooms/{room_id}/unread/{user_id}")
+async def get_unread_count(room_id: str, user_id: str):
+    member = await dynamo.get_room_member(room_id, user_id)
+    if member is None:
+        return {"room_id": room_id, "user_id": user_id, "unread_count": 0, "last_read_sort_key": None}
+
+    last_read_sort_key = member.get("last_read_sort_key", "")
+    unread_count = await dynamo.count_unread_messages(room_id, last_read_sort_key)
+    return {
+        "room_id": room_id,
+        "user_id": user_id,
+        "unread_count": unread_count,
+        "last_read_sort_key": last_read_sort_key or None,
+    }
 
 
 @app.get("/metrics")
@@ -103,13 +120,23 @@ async def _dispatch_frame(user_id: str, websocket: WebSocket, frame: dict) -> No
 
     if msg_type == "join":
         room_id = frame["room_id"]
-        await manager.join_room(room_id, user_id)
-        await websocket.send_text(json.dumps({"type": "joined", "room_id": room_id}))
+        unread_count = await manager.join_room(room_id, user_id)
+        await websocket.send_text(
+            json.dumps({"type": "joined", "room_id": room_id, "unread_count": unread_count})
+        )
 
     elif msg_type == "leave":
         room_id = frame["room_id"]
         await manager.leave_room(room_id, user_id)
         await websocket.send_text(json.dumps({"type": "left", "room_id": room_id}))
+
+    elif msg_type == "mark_read":
+        room_id = frame["room_id"]
+        sort_key = frame["sort_key"]
+        await dynamo.mark_room_read(room_id, user_id, sort_key)
+        await websocket.send_text(
+            json.dumps({"type": "read_ack", "room_id": room_id, "sort_key": sort_key})
+        )
 
     elif msg_type == "send":
         room_id = frame["room_id"]
@@ -137,6 +164,7 @@ async def _dispatch_frame(user_id: str, websocket: WebSocket, frame: dict) -> No
             "text": text,
             "message_id": stored["message_id"],
             "timestamp_ms": stored["timestamp_ms"],
+            "sort_key": stored["sort_key"],
             "client_msg_id": client_msg_id,
             "sent_at_ms": sent_at_ms,
         }

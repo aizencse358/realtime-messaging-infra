@@ -120,7 +120,7 @@ class ConnectionManager:
 
     # ---- room membership (refcounted subscribe/unsubscribe) ----
 
-    async def join_room(self, room_id: str, user_id: str) -> None:
+    async def join_room(self, room_id: str, user_id: str) -> int:
         async with self._lock:
             members = self.room_members.setdefault(room_id, set())
             is_first_local_member = len(members) == 0
@@ -135,9 +135,25 @@ class ConnectionManager:
                     room_id,
                     GATEWAY_ID,
                 )
-        await dynamo.put_room_member(room_id, user_id)
+
+        # A brand-new member starts "caught up" as of right now (they
+        # shouldn't see the room's entire history as unread); a returning
+        # member's last_read_sort_key is preserved by put_room_member's
+        # if_not_exists, so time spent offline correctly shows up as unread.
+        joined_at_sort_key = await dynamo.latest_message_sort_key(room_id)
+        await dynamo.put_room_member(room_id, user_id, initial_last_read_sort_key=joined_at_sort_key)
+        member = await dynamo.get_room_member(room_id, user_id)
+        last_read_sort_key = member["last_read_sort_key"] if member else joined_at_sort_key
+        unread_count = await dynamo.count_unread_messages(room_id, last_read_sort_key)
+
         room_joins_total.labels(GATEWAY_ID).inc()
-        logger.info("event=room_joined room_id=%s user_id=%s", room_id, user_id)
+        logger.info(
+            "event=room_joined room_id=%s user_id=%s unread_count=%d",
+            room_id,
+            user_id,
+            unread_count,
+        )
+        return unread_count
 
     async def leave_room(self, room_id: str, user_id: str) -> None:
         async with self._lock:

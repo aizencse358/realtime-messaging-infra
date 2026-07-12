@@ -135,6 +135,7 @@
       <input id="room" placeholder="room (e.g. general)" autocomplete="off" />
       <button id="join-btn" disabled>Join</button>
       <button id="leave-btn" class="secondary" disabled>Leave</button>
+      <button id="mark-read-btn" class="secondary" disabled>Mark read</button>
     </div>
   </section>
 
@@ -161,6 +162,7 @@
   const roomEl = $("room");
   const joinBtn = $("join-btn");
   const leaveBtn = $("leave-btn");
+  const markReadBtn = $("mark-read-btn");
 
   const composer = $("composer");
   const messageEl = $("message");
@@ -169,6 +171,7 @@
   let ws = null;
   let gatewayId = null;
   let currentRoom = null;
+  let lastSortKey = null;
 
   function appendLine({ text, sender, meta, system }) {
     const li = document.createElement("li");
@@ -202,10 +205,12 @@
 
   function setJoined(joined) {
     leaveBtn.disabled = !joined;
+    markReadBtn.disabled = !joined;
     messageEl.disabled = !joined;
     sendBtn.disabled = !joined;
     joinBtn.disabled = joined || !ws;
     roomEl.disabled = joined;
+    if (!joined) lastSortKey = null;
   }
 
   async function loadHistory(roomId) {
@@ -218,6 +223,7 @@
           text: m.text,
           meta: new Date(m.timestamp_ms).toLocaleTimeString(),
         });
+        lastSortKey = m.sort_key;
       }
     } catch (e) {
       appendLine({ system: true, text: `failed to load history: ${e}` });
@@ -257,7 +263,13 @@
         case "joined":
           currentRoom = frame.room_id;
           setJoined(true);
-          appendLine({ system: true, text: `joined room "${frame.room_id}"` });
+          appendLine({
+            system: true,
+            text:
+              frame.unread_count > 0
+                ? `joined room "${frame.room_id}" — ${frame.unread_count} unread`
+                : `joined room "${frame.room_id}" — caught up`,
+          });
           loadHistory(frame.room_id);
           break;
         case "left":
@@ -271,6 +283,10 @@
             text: frame.text,
             meta: new Date(frame.timestamp_ms).toLocaleTimeString(),
           });
+          lastSortKey = frame.sort_key;
+          break;
+        case "read_ack":
+          appendLine({ system: true, text: `marked "${frame.room_id}" read` });
           break;
         case "error":
           appendLine({ system: true, text: `error: ${frame.error}` });
@@ -292,6 +308,11 @@
   leaveBtn.addEventListener("click", () => {
     if (!ws || !currentRoom) return;
     ws.send(JSON.stringify({ type: "leave", room_id: currentRoom }));
+  });
+
+  markReadBtn.addEventListener("click", () => {
+    if (!ws || !currentRoom || !lastSortKey) return;
+    ws.send(JSON.stringify({ type: "mark_read", room_id: currentRoom, sort_key: lastSortKey }));
   });
 
   composer.addEventListener("submit", (event) => {

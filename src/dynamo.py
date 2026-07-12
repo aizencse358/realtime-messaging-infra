@@ -159,14 +159,27 @@ async def update_last_seen(user_id: str, last_seen_at: int | None = None) -> Non
     await asyncio.to_thread(_update_last_seen_sync, user_id, last_seen_at)
 
 
-def _put_room_member_sync(room_id: str, user_id: str) -> None:
-    _room_members_table().put_item(
-        Item={"room_id": room_id, "user_id": user_id, "joined_at": int(time.time())}
+def _put_room_member_sync(room_id: str, user_id: str, initial_last_read_sort_key: str) -> None:
+    # if_not_exists so this is safe to call on every join, not just the
+    # first: a returning member's joined_at and (more importantly)
+    # last_read_sort_key must survive a rejoin, or "unread since I was last
+    # here" would reset to zero every time.
+    _room_members_table().update_item(
+        Key={"room_id": room_id, "user_id": user_id},
+        UpdateExpression=(
+            "SET joined_at = if_not_exists(joined_at, :now), "
+            "last_read_sort_key = if_not_exists(last_read_sort_key, :initial)"
+        ),
+        ExpressionAttributeValues={":now": int(time.time()), ":initial": initial_last_read_sort_key},
     )
 
 
-async def put_room_member(room_id: str, user_id: str) -> None:
-    await asyncio.to_thread(_put_room_member_sync, room_id, user_id)
+async def put_room_member(
+    room_id: str, user_id: str, initial_last_read_sort_key: str = ""
+) -> None:
+    await asyncio.to_thread(
+        _put_room_member_sync, room_id, user_id, initial_last_read_sort_key
+    )
 
 
 def _delete_room_member_sync(room_id: str, user_id: str) -> None:
@@ -175,3 +188,52 @@ def _delete_room_member_sync(room_id: str, user_id: str) -> None:
 
 async def delete_room_member(room_id: str, user_id: str) -> None:
     await asyncio.to_thread(_delete_room_member_sync, room_id, user_id)
+
+
+def _get_room_member_sync(room_id: str, user_id: str) -> dict | None:
+    resp = _room_members_table().get_item(Key={"room_id": room_id, "user_id": user_id})
+    return resp.get("Item")
+
+
+async def get_room_member(room_id: str, user_id: str) -> dict | None:
+    return await asyncio.to_thread(_get_room_member_sync, room_id, user_id)
+
+
+def _mark_room_read_sync(room_id: str, user_id: str, sort_key: str) -> None:
+    _room_members_table().update_item(
+        Key={"room_id": room_id, "user_id": user_id},
+        UpdateExpression="SET last_read_sort_key = :sk",
+        ExpressionAttributeValues={":sk": sort_key},
+    )
+
+
+async def mark_room_read(room_id: str, user_id: str, sort_key: str) -> None:
+    await asyncio.to_thread(_mark_room_read_sync, room_id, user_id, sort_key)
+
+
+def _count_unread_messages_sync(room_id: str, last_read_sort_key: str) -> int:
+    key_condition = Key("conversation_id").eq(room_id)
+    if last_read_sort_key:
+        key_condition &= Key("sort_key").gt(last_read_sort_key)
+
+    total = 0
+    kwargs: dict = {"KeyConditionExpression": key_condition, "Select": "COUNT"}
+    while True:
+        resp = _messages_table().query(**kwargs)
+        total += resp["Count"]
+        if "LastEvaluatedKey" not in resp:
+            return total
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+
+async def count_unread_messages(room_id: str, last_read_sort_key: str) -> int:
+    return await asyncio.to_thread(_count_unread_messages_sync, room_id, last_read_sort_key)
+
+
+def _latest_message_sort_key_sync(room_id: str) -> str:
+    items = _get_room_messages_sync(room_id, limit=1, before=None)
+    return items[0]["sort_key"] if items else ""
+
+
+async def latest_message_sort_key(room_id: str) -> str:
+    return await asyncio.to_thread(_latest_message_sort_key_sync, room_id)
