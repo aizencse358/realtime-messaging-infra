@@ -294,20 +294,25 @@ Two tiers:
   nginx: end-to-end join/send/receive, message history pagination against
   real DynamoDB, and cross-instance fanout (asserts connections actually
   land on more than one replica and a message crosses between them). Plus
-  two chaos tiers that each kill a real dependency mid-session and verify
-  the system degrades gracefully and recovers on its own:
+  chaos tests that each kill something real mid-session and verify the
+  system degrades gracefully and recovers on its own:
 
   - **a gateway replica dies** — the client on it gets disconnected, but
     new connections keep landing on the surviving replicas (nginx routes
     around the dead one, with a bounded 2s failover rather than a 60s
     hang) and rooms keep fanning out correctly.
+  - **a majority of the fleet dies (2 of 3 gateways)** — a step up from
+    one dead replica: every new connection has nowhere to go but the
+    single survivor, and it's confirmed to keep joining, sending, and
+    fanning out correctly alone — not just accepting connections. Once the
+    other two recover, load spreads back across all 3.
   - **Redis dies** — every gateway shares this one dependency, so it's a
-    step up in blast radius from a single dead replica. A `send` during
-    the outage returns a clean `{"type":"error","error":"redis_unavailable"}`
-    frame instead of killing the connection, and fanout resumes
-    automatically once Redis is back — each gateway's pub/sub listener
-    reconnects and resubscribes to everything it was tracking, no gateway
-    restart required.
+    different kind of step up in blast radius than losing replicas. A
+    `send` during the outage returns a clean
+    `{"type":"error","error":"redis_unavailable"}` frame instead of
+    killing the connection, and fanout resumes automatically once Redis is
+    back — each gateway's pub/sub listener reconnects and resubscribes to
+    everything it was tracking, no gateway restart required.
   - **DynamoDB Local dies** — a `send` during the outage returns
     `{"type":"error","error":"dynamo_unavailable"}` within a couple
     seconds (bounded by `dynamo._BOTO_CONFIG`'s timeouts, not boto3's much
