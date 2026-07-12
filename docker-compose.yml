@@ -11,7 +11,19 @@ services:
 
   dynamodb-local:
     image: amazon/dynamodb-local:2.5.4
-    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    # Persisted to a volume rather than -inMemory: an ordinary container
+    # restart (crash, `docker compose restart`, host reboot) shouldn't wipe
+    # every table's schema and data along with it. `dynamo.py` also
+    # self-heals (recreates tables and retries once) if it ever does find
+    # them missing — e.g. the volume itself gets removed — but that's a
+    # fallback, not the first line of defense.
+    #
+    # Named volumes are created root-owned; this image's default non-root
+    # user can't write the sqlite file into it, so it's run as root here.
+    user: root
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
     ports:
       - "8001:8000"
 
@@ -100,3 +112,6 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+
+volumes:
+  dynamodb-data:

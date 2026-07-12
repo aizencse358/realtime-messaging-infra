@@ -3,6 +3,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -113,6 +114,16 @@ async def _handle_frame(user_id: str, websocket: WebSocket, raw: str) -> None:
             frame.get("type"),
         )
         await websocket.send_text(json.dumps({"type": "error", "error": "redis_unavailable"}))
+    except (BotoCoreError, ClientError):
+        # Same idea for DynamoDB: a transient outage (or the moment between
+        # discovering a table is missing and dynamo._resilient recreating
+        # it) shouldn't cost the client its connection either.
+        logger.warning(
+            "event=dynamo_unavailable action=handle_frame user_id=%s frame_type=%s",
+            user_id,
+            frame.get("type"),
+        )
+        await websocket.send_text(json.dumps({"type": "error", "error": "dynamo_unavailable"}))
 
 
 async def _dispatch_frame(user_id: str, websocket: WebSocket, frame: dict) -> None:

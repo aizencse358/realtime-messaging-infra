@@ -87,34 +87,52 @@ def restart_gateway_after():
         time.sleep(12)
 
 
-class RedisOutage:
-    """Test controls exactly when Redis goes down and when it comes back —
-    unlike restart_gateway_after, the test needs to assert behavior *during*
-    the outage and *after* recovery within the same test body, not just
-    guarantee cleanup afterward."""
+class DependencyOutage:
+    """Test controls exactly when a shared dependency (redis, dynamodb-local)
+    goes down and comes back — unlike restart_gateway_after, the test needs
+    to assert behavior *during* the outage and *after* recovery within the
+    same test body, not just guarantee cleanup afterward."""
 
-    def __init__(self):
+    def __init__(self, service: str, ready_path: str = "/healthz"):
+        self.service = service
+        # /healthz only proves the gateway process is up, not that the
+        # dependency behind it is actually ready — DynamoDB Local's Java
+        # process in particular takes a beat to accept connections even
+        # after the container reports healthy, so callers that need the
+        # dependency itself confirmed ready (not just the gateway) should
+        # pass a path that actually touches it.
+        self.ready_path = ready_path
         self._stopped = False
 
     def stop(self) -> None:
-        docker_compose("stop", "redis")
+        docker_compose("stop", self.service)
         self._stopped = True
 
     def restore(self) -> None:
-        docker_compose("start", "redis")
+        docker_compose("start", self.service)
         for _ in range(25):
             try:
-                httpx.get(f"{BASE_HTTP}/healthz", timeout=2)
-                break
+                resp = httpx.get(f"{BASE_HTTP}{self.ready_path}", timeout=2)
+                if resp.status_code < 500:
+                    break
             except httpx.HTTPError:
-                time.sleep(0.5)
+                pass
+            time.sleep(0.5)
         self._stopped = False
 
 
 @pytest.fixture
 def redis_outage():
-    outage = RedisOutage()
+    outage = DependencyOutage("redis")
     yield outage
     if outage._stopped:
         # safety net in case the test forgot or failed before restoring
+        outage.restore()
+
+
+@pytest.fixture
+def dynamodb_outage():
+    outage = DependencyOutage("dynamodb-local", ready_path="/rooms/_outage_readiness_probe/messages")
+    yield outage
+    if outage._stopped:
         outage.restore()

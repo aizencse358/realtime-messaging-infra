@@ -70,6 +70,28 @@ needed. See [`tests/integration/test_redis_outage.py`](tests/integration/test_re
 | `Users`        | `user_id`        | —                         | `last_seen_at` flushed on disconnect     |
 | `RoomMembers`  | `room_id`        | `user_id`                 | GSI `gsi_user_rooms` reverses the key (`user_id` → `room_id`) for "which rooms is this user in" lookups; `last_read_sort_key` tracks per-user unread state (see [Unread and catch-up tracking](#unread-and-catch-up-tracking)) |
 
+### DynamoDB resilience
+
+DynamoDB Local runs against a persistent volume, not `-inMemory` — an
+ordinary container restart shouldn't wipe every table's schema and data
+along with it (this actually happened once while building the project:
+after a manual restart, *every* gateway started failing *every* DynamoDB
+call, including ones unrelated to whatever triggered the outage, with
+`ResourceNotFoundException: Cannot do operations on a non-existent
+table`). `dynamo.py` also self-heals as a fallback: any operation that
+discovers a table missing recreates it and retries once, so even a wiped
+volume doesn't need a gateway restart to recover from.
+
+Separately, boto3's stock timeouts/retries are tuned for AWS's real
+network, not "the container next to me is unreachable" — left alone, an
+outage makes calls hang for a long time before ever raising. `dynamo.py`
+configures tight `connect_timeout`/`read_timeout` values instead, and a
+DynamoDB error while handling a WS frame returns a
+`{"type":"error","error":"dynamo_unavailable"}` frame rather than killing
+the connection — same idea as the [Redis outage handling](#refcounted-room-subscriptions)
+above, applied to the other stateful dependency. See
+[`tests/integration/test_dynamodb_outage.py`](tests/integration/test_dynamodb_outage.py).
+
 ### Gateway responsibilities
 
 - Refcount room subscriptions per instance (subscribe on first local join,
@@ -286,6 +308,14 @@ Two tiers:
     automatically once Redis is back — each gateway's pub/sub listener
     reconnects and resubscribes to everything it was tracking, no gateway
     restart required.
+  - **DynamoDB Local dies** — a `send` during the outage returns
+    `{"type":"error","error":"dynamo_unavailable"}` within a couple
+    seconds (bounded by `dynamo._BOTO_CONFIG`'s timeouts, not boto3's much
+    longer stock defaults) rather than hanging, and the connection stays
+    open. Persistence resumes automatically once it's back, with the data
+    from before the outage still intact — see
+    [DynamoDB resilience](#dynamodb-resilience) for why that used to not
+    be true.
 
   Auto-skips (not fails) if the stack isn't reachable, so it's safe to
   include in a full `uv run pytest` run even without compose up — this is
@@ -298,10 +328,10 @@ Two tiers:
   ```
 
   This tier is what actually caught real bugs while building this project
-  — a pub/sub listener crash, an nginx routing gotcha, and (building the
-  Redis chaos test) a second pub/sub reconnection gap — that the
-  fakeredis/moto unit tests couldn't see, since all of them only reproduced
-  against the real stack.
+  — a pub/sub listener crash, an nginx routing gotcha, a pub/sub
+  reconnection gap, and a DynamoDB outage that both hung and didn't
+  self-heal — that the fakeredis/moto unit tests couldn't see, since all
+  of them only reproduced against the real stack.
 
 ## Load testing
 
