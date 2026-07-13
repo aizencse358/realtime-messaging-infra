@@ -354,7 +354,13 @@
           appendLine({ system: true, text: `marked "${frame.room_id}" read` });
           break;
         case "error":
-          appendLine({ system: true, text: `error: ${frame.error}` });
+          appendLine({
+            system: true,
+            text:
+              frame.error === "rate_limited"
+                ? `sending too fast — try again in ${frame.retry_after_seconds}s`
+                : `error: ${frame.error}`,
+          });
           break;
       }
     });

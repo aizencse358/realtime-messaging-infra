@@ -122,6 +122,7 @@ realtime-messaging-infra/
 │   ├── redis_client.py        # shared redis.asyncio client
 │   ├── metrics.py              # Prometheus metric definitions
 │   ├── observability.py        # structured logging + HTTP timing middleware
+│   ├── rate_limit.py            # per-user send rate limit (Redis fixed window)
 │   ├── schemas.py               # WS frame pydantic models
 │   ├── config.py                # env config + key/channel name helpers
 │   └── init_tables.py            # one-shot DynamoDB table creation (compose service)
@@ -206,6 +207,22 @@ open connection via:
 ```
 GET /rooms/{room_id}/unread/{user_id}
 ```
+
+### Rate limiting
+
+`send` is throttled per user via a fixed-window counter in Redis (`INCR` +
+`EXPIRE` on the key's first hit in the window) — `RATE_LIMIT_SEND_MAX_MESSAGES`
+messages (default 10) per `RATE_LIMIT_SEND_WINDOW_SECONDS` (default 5),
+configurable per env var like everything else in `docker-compose.yml`.
+It's enforced in Redis rather than in-process specifically so it's a real
+per-user limit: the counter is shared across all 3 replicas, so
+reconnecting to land on a different gateway doesn't reset it. Exceeding it
+returns `{"type": "error", "error": "rate_limited", "retry_after_seconds":
+N}` rather than dropping the connection — same pattern as the Redis/DynamoDB
+outage handling, a frame-level error the client can act on and retry past.
+It's a simple fixed window (not a sliding log), so a client can burst up to
+~2x the limit right at a window boundary — an acceptable tradeoff for
+stopping abuse, not for precise billing.
 
 Debug endpoints (hit any replica directly or through nginx):
 

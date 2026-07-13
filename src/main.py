@@ -12,8 +12,9 @@ from redis.exceptions import RedisError
 from src import dynamo
 from src.config import GATEWAY_ID, presence_key, registry_key
 from src.connection_manager import manager
-from src.metrics import message_persist_seconds, messages_sent_total
+from src.metrics import message_persist_seconds, messages_sent_total, rate_limit_exceeded_total
 from src.observability import configure_logging, install_request_logging
+from src.rate_limit import check_send_rate_limit
 from src.redis_client import close_redis, get_redis
 
 configure_logging()
@@ -154,6 +155,26 @@ async def _dispatch_frame(user_id: str, websocket: WebSocket, frame: dict) -> No
         text = frame["text"]
         client_msg_id = frame.get("client_msg_id")
         sent_at_ms = frame.get("sent_at_ms")
+
+        rate_limit = await check_send_rate_limit(user_id)
+        if not rate_limit.allowed:
+            rate_limit_exceeded_total.labels(GATEWAY_ID).inc()
+            logger.info(
+                "event=rate_limited sender_id=%s room_id=%s retry_after_seconds=%d",
+                user_id,
+                room_id,
+                rate_limit.retry_after_seconds,
+            )
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "error": "rate_limited",
+                        "retry_after_seconds": rate_limit.retry_after_seconds,
+                    }
+                )
+            )
+            return
 
         t0 = time.perf_counter()
         stored = await dynamo.put_message(room_id, user_id, text)

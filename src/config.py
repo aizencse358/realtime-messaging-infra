@@ -16,6 +16,12 @@ PRESENCE_TTL_SECONDS = int(os.getenv("PRESENCE_TTL_SECONDS", "45"))
 PRESENCE_HEARTBEAT_SECONDS = int(os.getenv("PRESENCE_HEARTBEAT_SECONDS", "20"))
 REGISTRY_TTL_SECONDS = int(os.getenv("REGISTRY_TTL_SECONDS", "45"))
 
+# Per-user "send" rate limit: fixed window, enforced in Redis (shared
+# across all 3 gateway replicas, so it's a real per-user limit and not
+# something a client can dodge by reconnecting to a different instance).
+RATE_LIMIT_SEND_MAX_MESSAGES = int(os.getenv("RATE_LIMIT_SEND_MAX_MESSAGES", "10"))
+RATE_LIMIT_SEND_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_SEND_WINDOW_SECONDS", "5"))
+
 # Unique per gateway process. GATEWAY_ID is set per-replica in docker-compose; a
 # random suffix is appended so two instances launched with the same env value
 # (e.g. local dev, no compose) never collide in the registry.
@@ -40,3 +46,7 @@ def presence_key(user_id: str) -> str:
 
 def registry_key(user_id: str) -> str:
     return f"registry:user:{user_id}"
+
+
+def rate_limit_send_key(user_id: str) -> str:
+    return f"ratelimit:send:{user_id}"

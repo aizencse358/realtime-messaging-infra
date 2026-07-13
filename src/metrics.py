@@ -48,6 +48,12 @@ message_persist_seconds = Histogram(
     ["gateway_id"],
 )
 
+rate_limit_exceeded_total = Counter(
+    "rate_limit_exceeded_total",
+    "Send frames rejected for exceeding the per-user rate limit",
+    ["gateway_id"],
+)
+
 http_request_seconds = Histogram(
     "http_request_duration_seconds",
     "HTTP request latency",
