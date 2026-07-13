@@ -168,10 +168,25 @@
   const messageEl = $("message");
   const sendBtn = $("send-btn");
 
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 10000;
+
   let ws = null;
   let gatewayId = null;
   let currentRoom = null;
   let lastSortKey = null;
+
+  // A close because the server/network dropped us should auto-reconnect
+  // with backoff and rejoin whatever room we were in (unread tracking
+  // already makes "rejoin after a gap" the correct, tested path — see
+  // tests/integration/test_*_outage.py and test_majority_failure.py,
+  // which is exactly the kind of event this is meant to ride out). A close
+  // because the user clicked Disconnect should not.
+  let manualDisconnect = false;
+  let reconnectTimer = null;
+  let reconnectAttempt = 0;
+  let activeUsername = null;
+  let rejoinRoom = null;
 
   function appendLine({ text, sender, meta, system }) {
     const li = document.createElement("li");
@@ -193,24 +208,30 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  function setConnected(connected) {
-    statusEl.classList.toggle("online", connected);
-    statusText.textContent = connected ? `connected via ${gatewayId}` : "disconnected";
-    connectBtn.disabled = connected;
-    usernameEl.disabled = connected;
-    disconnectBtn.disabled = !connected;
-    joinBtn.disabled = !connected;
-    if (!connected) setJoined(false);
-  }
+  function render() {
+    const connected = !!gatewayId;
+    const reconnecting = !!reconnectTimer;
+    const joined = connected && currentRoom !== null;
 
-  function setJoined(joined) {
+    statusEl.classList.toggle("online", connected);
+    if (connected) {
+      statusText.textContent = `connected via ${gatewayId}`;
+    } else if (reconnecting) {
+      statusText.textContent = `reconnecting… (attempt ${reconnectAttempt})`;
+    } else {
+      statusText.textContent = "disconnected";
+    }
+
+    connectBtn.disabled = connected || reconnecting;
+    usernameEl.disabled = connected || reconnecting;
+    disconnectBtn.disabled = !connected && !reconnecting;
+
+    joinBtn.disabled = !connected || joined;
     leaveBtn.disabled = !joined;
     markReadBtn.disabled = !joined;
     messageEl.disabled = !joined;
     sendBtn.disabled = !joined;
-    joinBtn.disabled = joined || !ws;
     roomEl.disabled = joined;
-    if (!joined) lastSortKey = null;
   }
 
   async function loadHistory(roomId) {
@@ -230,9 +251,33 @@
     }
   }
 
-  connectBtn.addEventListener("click", () => {
-    const username = usernameEl.value.trim();
-    if (!username) return;
+  function scheduleReconnect() {
+    reconnectAttempt += 1;
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** (reconnectAttempt - 1), RECONNECT_MAX_MS);
+    appendLine({
+      system: true,
+      text: `connection lost — reconnecting in ${(delay / 1000).toFixed(0)}s (attempt ${reconnectAttempt})…`,
+    });
+    render();
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect(activeUsername);
+    }, delay);
+  }
+
+  function cancelReconnect() {
+    if (!reconnectTimer) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    reconnectAttempt = 0;
+    rejoinRoom = null;
+    appendLine({ system: true, text: "reconnect cancelled" });
+    render();
+  }
+
+  function connect(username) {
+    activeUsername = username;
+    manualDisconnect = false;
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(username)}`);
@@ -243,9 +288,22 @@
 
     ws.addEventListener("close", () => {
       appendLine({ system: true, text: "socket closed" });
+      const wasInRoom = currentRoom;
       ws = null;
       gatewayId = null;
-      setConnected(false);
+      currentRoom = null;
+      lastSortKey = null;
+
+      if (manualDisconnect) {
+        manualDisconnect = false;
+        reconnectAttempt = 0;
+        render();
+        return;
+      }
+
+      rejoinRoom = wasInRoom;
+      render();
+      scheduleReconnect();
     });
 
     ws.addEventListener("error", () => {
@@ -257,12 +315,19 @@
       switch (frame.type) {
         case "connected":
           gatewayId = frame.gateway_id;
-          setConnected(true);
+          reconnectAttempt = 0;
           appendLine({ system: true, text: `connected as ${frame.user_id}, served by ${gatewayId}` });
+          render();
+          if (rejoinRoom) {
+            const roomToRejoin = rejoinRoom;
+            rejoinRoom = null;
+            roomEl.value = roomToRejoin;
+            ws.send(JSON.stringify({ type: "join", room_id: roomToRejoin }));
+          }
           break;
         case "joined":
           currentRoom = frame.room_id;
-          setJoined(true);
+          render();
           appendLine({
             system: true,
             text:
@@ -274,7 +339,7 @@
           break;
         case "left":
           currentRoom = null;
-          setJoined(false);
+          render();
           appendLine({ system: true, text: `left room "${frame.room_id}"` });
           break;
         case "message":
@@ -293,10 +358,27 @@
           break;
       }
     });
+
+    render();
+  }
+
+  connectBtn.addEventListener("click", () => {
+    const username = usernameEl.value.trim();
+    if (!username) return;
+    reconnectAttempt = 0;
+    rejoinRoom = null;
+    connect(username);
   });
 
   disconnectBtn.addEventListener("click", () => {
-    if (ws) ws.close();
+    if (reconnectTimer) {
+      cancelReconnect();
+      return;
+    }
+    if (ws) {
+      manualDisconnect = true;
+      ws.close();
+    }
   });
 
   joinBtn.addEventListener("click", () => {

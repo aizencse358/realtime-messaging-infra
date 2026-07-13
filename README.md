@@ -156,6 +156,16 @@ gateway replica (`gateway1`/`2`/`3`) it landed on, so opening a few browser
 tabs and joining the same room shows messages fanning out across replicas
 in real time.
 
+If the connection drops unexpectedly (a gateway restart, one of the chaos
+tests, a network blip — anything other than clicking **Disconnect**), the
+client automatically reconnects with exponential backoff (1s, 2s, 4s, …,
+capped at 10s) and rejoins whatever room it was in, so the existing unread
+tracking naturally shows what was missed. Verified against the real stack
+with a headless-Chrome-driven test: connect, kill the gateway it landed
+on, confirm it reconnects via a *different* replica and rejoins the room
+automatically. Clicking **Disconnect** during the backoff countdown
+cancels it instead of reconnecting.
+
 Or connect a raw WebSocket client to `ws://localhost:8080/ws/{user_id}` and
 send JSON frames directly:
 
